@@ -55,6 +55,8 @@ Open a pull request into `main`. Include the concrete behavior changed, meaningf
 
 Branch protection can enforce this process when configured by a repository administrator. This document does not itself enable protection or grant collaborators write access.
 
+The verification workflow also supports a manual run from **Actions → Public source policy → Run workflow**. Use it to recheck a branch without changing application code.
+
 ## Reporting progress
 
 Use pull request descriptions and concise commit messages for project changes. Distinguish code completion, automated checks, browser/device results, and deployed verification. Keep private assignments, personal coordination, recordings, real data, and agent instructions outside GitHub. Public technical documentation should remain sufficient for a fresh contributor to build the project.
