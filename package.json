@@ -12,6 +12,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:repo": "node --test scripts/check-public-files.test.mjs",
     "check:public": "node scripts/check-public-files.mjs --worktree",
     "setup:hooks": "node scripts/install-git-hooks.mjs",
