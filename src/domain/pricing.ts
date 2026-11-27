@@ -205,40 +205,22 @@ function indexOptionGroups(
   return byModifierId;
 }
 
-function priceDraftLineWithIndex(
-  line: DraftLine,
-  itemsById: ReadonlyMap<string, CatalogItem>,
-  localUnavailableItemIds?: ReadonlySet<string>
-): ConfirmedLine {
-  if (!line || typeof line !== 'object' || typeof line.itemId !== 'string' || !line.itemId) {
-    throw new DomainPricingError('UNKNOWN_ITEM', 'Draft line is missing a valid itemId.');
-  }
-  if (!Array.isArray(line.modifierIds)) {
+function resolveLineOptionEntries(
+  item: CatalogItem,
+  modifierIds: readonly string[]
+): Array<{ group: CatalogOptionGroup; choice: CatalogModifier }> {
+  if (!Array.isArray(modifierIds)) {
     throw new DomainPricingError('UNKNOWN_MODIFIER', 'Draft line modifierIds must be an array.', {
-      itemId: line.itemId,
-    });
-  }
-
-  const quantity = validateQuantity(line.quantity);
-  const item = itemsById.get(line.itemId);
-  if (!item) {
-    throw new DomainPricingError('UNKNOWN_ITEM', `Unknown catalog item: ${line.itemId}`, {
-      itemId: line.itemId,
-    });
-  }
-  if (!item.available || localUnavailableItemIds?.has(item.itemId)) {
-    throw new DomainPricingError('ITEM_UNAVAILABLE', `Catalog item is unavailable: ${item.itemId}`, {
       itemId: item.itemId,
     });
   }
 
-  const capturedUnitPriceUnits = assertSafeNonNegativeInt(item.unitPriceUnits, 'unitPriceUnits');
   const byModifierId = indexOptionGroups(item);
   const seenModifiers = new Set<string>();
   const selectedGroups = new Set<string>();
-  let capturedModifierDeltaUnits = 0;
+  const resolved: Array<{ group: CatalogOptionGroup; choice: CatalogModifier }> = [];
 
-  for (const modifierId of line.modifierIds) {
+  for (const modifierId of modifierIds) {
     if (typeof modifierId !== 'string' || !modifierId) {
       throw new DomainPricingError('UNKNOWN_MODIFIER', 'Modifier ID must be a non-empty string.', {
         itemId: item.itemId,
@@ -268,7 +250,66 @@ function priceDraftLineWithIndex(
     }
     seenModifiers.add(modifierId);
     selectedGroups.add(entry.group.groupId);
-    const delta = assertSafeSignedInt(entry.choice.deltaUnits, 'modifier.deltaUnits');
+    resolved.push(entry);
+  }
+
+  return resolved;
+}
+
+export type ResolvedOptionChoice = {
+  groupId: string;
+  groupName: string;
+  modifierId: string;
+  choiceName: string;
+  deltaUnits: number;
+};
+
+/**
+ * Validates and resolves selected modifier IDs against an item's option groups for UI/receipt display.
+ */
+export function resolveSelectedOptions(
+  item: CatalogItem,
+  modifierIds: readonly string[]
+): ResolvedOptionChoice[] {
+  return resolveLineOptionEntries(item, modifierIds).map(({ group, choice }) => ({
+    groupId: group.groupId,
+    groupName: group.name,
+    modifierId: choice.modifierId,
+    choiceName: choice.name,
+    deltaUnits: assertSafeSignedInt(choice.deltaUnits, 'modifier.deltaUnits'),
+  }));
+}
+
+function priceDraftLineWithIndex(
+  line: DraftLine,
+  itemsById: ReadonlyMap<string, CatalogItem>,
+  localUnavailableItemIds?: ReadonlySet<string>
+): ConfirmedLine {
+  if (!line || typeof line !== 'object' || typeof line.itemId !== 'string' || !line.itemId) {
+    throw new DomainPricingError('UNKNOWN_ITEM', 'Draft line is missing a valid itemId.');
+  }
+
+  const quantity = validateQuantity(line.quantity);
+  const item = itemsById.get(line.itemId);
+  if (!item) {
+    throw new DomainPricingError('UNKNOWN_ITEM', `Unknown catalog item: ${line.itemId}`, {
+      itemId: line.itemId,
+    });
+  }
+  if (!item.available || localUnavailableItemIds?.has(item.itemId)) {
+    throw new DomainPricingError('ITEM_UNAVAILABLE', `Catalog item is unavailable: ${item.itemId}`, {
+      itemId: item.itemId,
+    });
+  }
+
+  const capturedUnitPriceUnits = assertSafeNonNegativeInt(item.unitPriceUnits, 'unitPriceUnits');
+  const resolvedEntries = resolveLineOptionEntries(item, line.modifierIds);
+  const selectedGroups = new Set<string>();
+  let capturedModifierDeltaUnits = 0;
+
+  for (const { group, choice } of resolvedEntries) {
+    selectedGroups.add(group.groupId);
+    const delta = assertSafeSignedInt(choice.deltaUnits, 'modifier.deltaUnits');
     capturedModifierDeltaUnits = safeAddSigned(
       capturedModifierDeltaUnits,
       delta,
@@ -434,4 +475,66 @@ export function buildConfirmedSale(input: BuildConfirmedSaleInput): ConfirmedSal
     );
   }
   return parsed.data;
+}
+
+function formatThousands(digits: string): string {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * Formats integer THB satang units (scale: 2) using pure BigInt arithmetic without floats.
+ */
+export function formatThbUnits(
+  units: number,
+  options?: { showSymbol?: boolean; signed?: boolean }
+): string {
+  const validUnits = assertSafeSignedInt(units, 'units');
+  const showSymbol = options?.showSymbol ?? true;
+  const signed = options?.signed ?? false;
+
+  const absBig = validUnits < 0 ? -BigInt(validUnits) : BigInt(validUnits);
+  const whole = formatThousands((absBig / 100n).toString());
+  const frac = (absBig % 100n).toString().padStart(2, '0');
+  const symbol = showSymbol ? '฿' : '';
+  const sign = validUnits < 0 ? '-' : validUnits > 0 && signed ? '+' : '';
+  return `${sign}${symbol}${whole}.${frac}`;
+}
+
+const THB_DECIMAL_PATTERN = /^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.(\d{1,2}))?$/;
+
+/**
+ * Parses a cashier THB string (e.g. "75.50", "1,250", "฿85.00") into nonnegative integer satang units.
+ */
+export function parseThbInputToUnits(input: string): number {
+  if (typeof input !== 'string') {
+    throw new DomainPricingError('INVALID_INTEGER', 'THB input must be a string.');
+  }
+  let trimmed = input.trim();
+  if (!trimmed) {
+    throw new DomainPricingError('INVALID_INTEGER', 'THB amount cannot be empty.');
+  }
+  if (trimmed.startsWith('-')) {
+    throw new DomainPricingError('NEGATIVE_AMOUNT', 'THB amount must be nonnegative.');
+  }
+  if (trimmed.startsWith('฿')) {
+    trimmed = trimmed.slice(1).trim();
+    if (trimmed.startsWith('-')) {
+      throw new DomainPricingError('NEGATIVE_AMOUNT', 'THB amount must be nonnegative.');
+    }
+  }
+  const match = THB_DECIMAL_PATTERN.exec(trimmed);
+  if (!match) {
+    throw new DomainPricingError('INVALID_INTEGER', 'Enter a valid THB amount with at most 2 decimals.', {
+      input,
+    });
+  }
+  const [wholeRaw, fracRaw = ''] = trimmed.split('.');
+  const wholeDigits = wholeRaw.replace(/,/g, '');
+  const totalBig = BigInt(wholeDigits) * 100n + BigInt(fracRaw.padEnd(2, '0'));
+  if (totalBig > MAX_SAFE_BIGINT) {
+    throw new DomainPricingError('INTEGER_OVERFLOW', 'THB amount exceeds safe integer bounds.', {
+      input,
+    });
+  }
+  return Number(totalBig);
 }

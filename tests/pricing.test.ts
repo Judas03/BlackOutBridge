@@ -9,8 +9,11 @@ import {
   ConfirmedSaleSchema,
   DomainPricingError,
   DraftLineSchema,
+  formatThbUnits,
+  parseThbInputToUnits,
   priceCart,
   priceDraftLine,
+  resolveSelectedOptions,
   safeAdd,
   safeAddSigned,
   safeMultiply,
@@ -574,5 +577,73 @@ describe('canonical payload serialization and SHA-256 digest', () => {
     expect(await computeSaleDigest(mutatedTotal)).not.toBe(baseDigest);
     expect(await computeSaleDigest(mutatedPayment)).not.toBe(baseDigest);
     expect(await computeSaleDigest(mutatedQty)).not.toBe(baseDigest);
+  });
+});
+
+describe('THB formatting, parsing, and option display helpers', () => {
+  it('formats THB satang units deterministically without floating-point errors', () => {
+    expect(formatThbUnits(0)).toBe('฿0.00');
+    expect(formatThbUnits(5)).toBe('฿0.05');
+    expect(formatThbUnits(7500)).toBe('฿75.00');
+    expect(formatThbUnits(123456)).toBe('฿1,234.56');
+    expect(formatThbUnits(-1000)).toBe('-฿10.00');
+    expect(formatThbUnits(1500, { signed: true })).toBe('+฿15.00');
+    expect(formatThbUnits(-1000, { showSymbol: false, signed: true })).toBe('-10.00');
+    expect(formatThbUnits(0, { signed: true })).toBe('฿0.00');
+
+    expectPricingError(() => formatThbUnits(12.5), 'INVALID_INTEGER');
+    expectPricingError(() => formatThbUnits(Number.NaN), 'INVALID_INTEGER');
+    expectPricingError(() => formatThbUnits(Number.MAX_SAFE_INTEGER + 1), 'INTEGER_OVERFLOW');
+  });
+
+  it('parses THB string inputs into exact satang integers and rejects malformed/negative values', () => {
+    expect(parseThbInputToUnits('75.10')).toBe(7510);
+    expect(parseThbInputToUnits('19.99')).toBe(1999);
+    expect(parseThbInputToUnits('0.1')).toBe(10);
+    expect(parseThbInputToUnits('0.01')).toBe(1);
+    expect(parseThbInputToUnits('1,250.50')).toBe(125050);
+    expect(parseThbInputToUnits('฿85')).toBe(8500);
+    expect(parseThbInputToUnits(' 100 ')).toBe(10000);
+
+    expectPricingError(() => parseThbInputToUnits('-5'), 'NEGATIVE_AMOUNT');
+    expectPricingError(() => parseThbInputToUnits('฿-5'), 'NEGATIVE_AMOUNT');
+    expectPricingError(() => parseThbInputToUnits('12.345'), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits('1,23.00'), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits('10.'), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits('.50'), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits(''), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits('abc'), 'INVALID_INTEGER');
+    expectPricingError(() => parseThbInputToUnits('99999999999999999'), 'INTEGER_OVERFLOW');
+  });
+
+  it('resolves grouped option display details and rejects invalid modifier combinations', () => {
+    const snapshot = makeSnapshot();
+    const espresso = snapshot.items[0];
+    expect(resolveSelectedOptions(espresso, ['option-1:choice-1', 'option-2:choice-1'])).toEqual([
+      {
+        groupId: 'option-1',
+        groupName: 'Size',
+        modifierId: 'option-1:choice-1',
+        choiceName: 'Small',
+        deltaUnits: -1000,
+      },
+      {
+        groupId: 'option-2',
+        groupName: 'Milk & Extras',
+        modifierId: 'option-2:choice-1',
+        choiceName: 'Oat Milk',
+        deltaUnits: 2000,
+      },
+    ]);
+
+    expectPricingError(
+      () => resolveSelectedOptions(espresso, ['option-1:choice-1', 'option-1:choice-3']),
+      'MULTIPLE_GROUP_SELECTIONS'
+    );
+    expectPricingError(
+      () => resolveSelectedOptions(espresso, ['option-1:choice-1', 'option-1:choice-1']),
+      'DUPLICATE_MODIFIER'
+    );
+    expectPricingError(() => resolveSelectedOptions(espresso, ['unknown-mod']), 'UNKNOWN_MODIFIER');
   });
 });
