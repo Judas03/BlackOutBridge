@@ -19,27 +19,38 @@ function createTestDb(factory = new IDBFactory(), name = 'test-blackoutbridge') 
 
 function makeSnapshot(overrides?: Partial<CatalogSnapshot>): CatalogSnapshot {
   return {
-    currency: 'MMK',
-    scale: 0,
-    snapshotId: 'snap-2026-11-26-01',
-    sourcePosId: 'pos-main-01',
-    issuedAt: '2026-11-26T08:00:00Z',
+    currency: 'THB',
+    scale: 2,
+    snapshotId: 'snap-2026-11-27-01',
+    sourcePosId: 'brew-points-pos-1',
+    issuedAt: '2026-11-27T08:00:00Z',
     items: [
       {
-        itemId: 'mohinga',
-        name: 'Mohinga',
-        aliases: ['fish noodle'],
-        unitPriceUnits: 3500,
+        itemId: 'espresso',
+        name: 'Espresso',
+        aliases: ['espresso'],
+        unitPriceUnits: 7500,
         available: true,
-        modifiers: [{ modifierId: 'extra-egg', name: 'Boiled Egg', deltaUnits: 700 }],
+        optionGroups: [
+          {
+            groupId: 'option-1',
+            name: 'Size',
+            required: true,
+            choices: [
+              { modifierId: 'option-1:choice-1', name: 'Small', deltaUnits: -1000 },
+              { modifierId: 'option-1:choice-2', name: 'Regular', deltaUnits: 0 },
+              { modifierId: 'option-1:choice-3', name: 'Large', deltaUnits: 1500 },
+            ],
+          },
+        ],
       },
       {
-        itemId: 'milk-tea',
-        name: 'Burmese Milk Tea',
+        itemId: 'americano',
+        name: 'Americano',
         aliases: [],
-        unitPriceUnits: 1500,
+        unitPriceUnits: 10000,
         available: true,
-        modifiers: [],
+        optionGroups: [],
       },
     ],
     ...overrides,
@@ -95,11 +106,11 @@ describe('catalog repository and local sold-out overrides', () => {
     const { repos } = createTestDb();
     const snapOld = makeSnapshot({
       snapshotId: 'snap-old',
-      issuedAt: '2026-11-25T08:00:00Z',
+      issuedAt: '2026-11-26T08:00:00Z',
     });
     const snapNew = makeSnapshot({
       snapshotId: 'snap-new',
-      issuedAt: '2026-11-26T09:00:00Z',
+      issuedAt: '2026-11-27T09:00:00Z',
     });
 
     await repos.catalog.saveSnapshot(snapOld);
@@ -117,7 +128,7 @@ describe('catalog repository and local sold-out overrides', () => {
     // Mutating snapshot under same ID is rejected.
     const altered = makeSnapshot({
       snapshotId: 'snap-new',
-      issuedAt: '2026-11-26T09:00:00Z',
+      issuedAt: '2026-11-27T09:00:00Z',
       items: [
         {
           ...snapNew.items[0],
@@ -128,17 +139,21 @@ describe('catalog repository and local sold-out overrides', () => {
     await expectStorageError(repos.catalog.saveSnapshot(altered), 'SNAPSHOT_CONFLICT');
 
     // Local sold-out override does not mutate the approved snapshot.
-    await repos.catalog.setLocalItemAvailability('snap-new', 'mohinga', false);
+    await repos.catalog.setLocalItemAvailability('snap-new', 'espresso', false);
     const unavailableIds = await repos.catalog.getLocalUnavailableItemIds('snap-new');
-    expect(unavailableIds.has('mohinga')).toBe(true);
+    expect(unavailableIds.has('espresso')).toBe(true);
 
     const persistedSnap = await repos.catalog.getSnapshotById('snap-new');
-    expect(persistedSnap?.items.find(i => i.itemId === 'mohinga')?.available).toBe(true);
-    expect(persistedSnap?.items.find(i => i.itemId === 'mohinga')?.unitPriceUnits).toBe(3500);
+    expect(persistedSnap?.items.find(i => i.itemId === 'espresso')?.available).toBe(true);
+    expect(persistedSnap?.items.find(i => i.itemId === 'espresso')?.unitPriceUnits).toBe(7500);
 
     // Pricing respects local sold-out overrides.
     expect(() =>
-      priceCart([{ itemId: 'mohinga', quantity: 1, modifierIds: [] }], persistedSnap!, unavailableIds)
+      priceCart(
+        [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-2'] }],
+        persistedSnap!,
+        unavailableIds
+      )
     ).toThrow(/unavailable/i);
   });
 
@@ -147,11 +162,11 @@ describe('catalog repository and local sold-out overrides', () => {
     await repos.catalog.saveSnapshot(makeSnapshot());
 
     await expectStorageError(
-      repos.catalog.setLocalItemAvailability('missing-snap', 'mohinga', false),
+      repos.catalog.setLocalItemAvailability('missing-snap', 'espresso', false),
       'SNAPSHOT_NOT_FOUND'
     );
     await expectStorageError(
-      repos.catalog.setLocalItemAvailability('snap-2026-11-26-01', 'missing-item', false),
+      repos.catalog.setLocalItemAvailability('snap-2026-11-27-01', 'missing-item', false),
       'INVALID_RECORD'
     );
   });
@@ -160,20 +175,22 @@ describe('catalog repository and local sold-out overrides', () => {
 describe('draft repository', () => {
   it('saves, reads, clears drafts, and rejects invalid draft lines', async () => {
     const { repos } = createTestDb();
-    const saved = await repos.drafts.saveDraft('snap-2026-11-26-01', [
-      { itemId: 'mohinga', quantity: 2, modifierIds: ['extra-egg'] },
+    const saved = await repos.drafts.saveDraft('snap-2026-11-27-01', [
+      { itemId: 'espresso', quantity: 2, modifierIds: ['option-1:choice-3'] },
     ]);
     expect(saved.lines).toHaveLength(1);
 
     const loaded = await repos.drafts.getDraft();
-    expect(loaded?.lines).toEqual([{ itemId: 'mohinga', quantity: 2, modifierIds: ['extra-egg'] }]);
+    expect(loaded?.lines).toEqual([
+      { itemId: 'espresso', quantity: 2, modifierIds: ['option-1:choice-3'] },
+    ]);
 
     await repos.drafts.clearDraft();
     expect(await repos.drafts.getDraft()).toBeUndefined();
 
     await expectStorageError(
-      repos.drafts.saveDraft('snap-2026-11-26-01', [
-        { itemId: 'mohinga', quantity: 0, modifierIds: [] },
+      repos.drafts.saveDraft('snap-2026-11-27-01', [
+        { itemId: 'americano', quantity: 0, modifierIds: [] },
       ]),
       'INVALID_RECORD'
     );
@@ -181,26 +198,29 @@ describe('draft repository', () => {
 });
 
 describe('atomic confirmed sale, payment, and queue transaction', () => {
-  it('commits sale, payment, and queue entry atomically and clears active draft', async () => {
+  it('commits sale (including signed modifier deltas), payment, and queue entry atomically and clears active draft', async () => {
     const { db, repos } = createTestDb();
     const snapshot = await repos.catalog.saveSnapshot(makeSnapshot());
     const deviceId = await repos.device.getOrCreateDeviceId();
     await repos.drafts.saveDraft(snapshot.snapshotId, [
-      { itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg'] },
+      { itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-1'] },
     ]);
 
     const sale = buildConfirmedSale({
       saleId: 'sale-atomic-01',
       sourceDeviceId: deviceId,
       snapshot,
-      recordedAt: '2026-11-26T10:00:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg'] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 800 },
+      recordedAt: '2026-11-27T10:00:00Z',
+      draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-1'] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 3500 },
     });
 
     const receipt = await repos.sales.confirmSale(sale, { clearDraftId: 'active' });
-    expect(receipt.sale.totalUnits).toBe(4200);
+    expect(receipt.sale.totalUnits).toBe(6500);
+    expect(receipt.sale.lines[0].capturedModifierDeltaUnits).toBe(-1000);
     expect(receipt.payment.status).toBe('CASH_RECORDED');
+    expect(receipt.payment.currency).toBe('THB');
+    expect(receipt.payment.scale).toBe(2);
     expect(receipt.queueEntry).toEqual({
       saleId: 'sale-atomic-01',
       payloadVersion: 1,
@@ -218,16 +238,16 @@ describe('atomic confirmed sale, payment, and queue transaction', () => {
     const { db, repos } = createTestDb();
     const snapshot = await repos.catalog.saveSnapshot(makeSnapshot());
     await repos.drafts.saveDraft(snapshot.snapshotId, [
-      { itemId: 'mohinga', quantity: 1, modifierIds: [] },
+      { itemId: 'americano', quantity: 1, modifierIds: [] },
     ]);
 
     const sale = buildConfirmedSale({
       saleId: 'sale-fail-queue',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:01:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 3500, changeUnits: 0 },
+      recordedAt: '2026-11-27T10:01:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 0 },
     });
 
     vi.spyOn(db.importQueue, 'add').mockRejectedValueOnce(new Error('Simulated QuotaExceededError'));
@@ -241,7 +261,6 @@ describe('atomic confirmed sale, payment, and queue transaction', () => {
     expect(await db.payments.count()).toBe(0);
     expect(await db.importQueue.count()).toBe(0);
     expect(await repos.sales.getReceiptBundle('sale-fail-queue')).toBeUndefined();
-    // Draft delete was part of the same failed transaction, so draft remains intact.
     expect((await repos.drafts.getDraft())?.lines).toHaveLength(1);
   });
 
@@ -253,9 +272,9 @@ describe('atomic confirmed sale, payment, and queue transaction', () => {
       saleId: 'sale-fail-payment',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:02:00Z',
-      draftLines: [{ itemId: 'milk-tea', quantity: 2, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 3000, changeUnits: 0 },
+      recordedAt: '2026-11-27T10:02:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 2, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 20000, changeUnits: 0 },
     });
 
     vi.spyOn(db.payments, 'add').mockRejectedValueOnce(new Error('Simulated IndexedDB write abort'));
@@ -275,44 +294,65 @@ describe('atomic confirmed sale, payment, and queue transaction', () => {
       saleId: 'sale-immutable-1',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:05:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 4000, changeUnits: 500 },
+      recordedAt: '2026-11-27T10:05:00Z',
+      draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-2'] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 2500 },
     });
 
     const replacement = buildConfirmedSale({
       saleId: 'sale-immutable-1',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:06:00Z',
-      draftLines: [{ itemId: 'milk-tea', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 2000, changeUnits: 500 },
+      recordedAt: '2026-11-27T10:06:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 12000, changeUnits: 2000 },
     });
 
     await repos.sales.confirmSale(original);
     await expectStorageError(repos.sales.confirmSale(replacement), 'DUPLICATE_SALE_ID');
 
     const stored = await repos.sales.getById('sale-immutable-1');
-    expect(stored?.totalUnits).toBe(3500);
-    expect(stored?.lines[0]?.itemId).toBe('mohinga');
+    expect(stored?.totalUnits).toBe(7500);
+    expect(stored?.lines[0]?.itemId).toBe('espresso');
   });
 
-  it('rejects tampered sale totals before writing anything', async () => {
+  it('rejects tampered sale totals and negative effective unit price before writing anything', async () => {
     const { db, repos } = createTestDb();
     const snapshot = await repos.catalog.saveSnapshot(makeSnapshot());
     const valid = buildConfirmedSale({
       saleId: 'sale-tampered-1',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:07:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 1500 },
+      recordedAt: '2026-11-27T10:07:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 0 },
     });
 
     await expectStorageError(
       repos.sales.confirmSale({ ...valid, totalUnits: 100 }),
       'INVALID_RECORD'
     );
+
+    await expectStorageError(
+      repos.sales.confirmSale({
+        ...valid,
+        saleId: 'sale-negative-unit',
+        lines: [
+          {
+            itemId: 'americano',
+            quantity: 1,
+            modifierIds: [],
+            capturedUnitPriceUnits: 1000,
+            capturedModifierDeltaUnits: -2000,
+            lineTotalUnits: 0,
+          },
+        ],
+        totalUnits: 0,
+        payment: { status: 'CASH_RECORDED', receivedUnits: 0, changeUnits: 0 },
+      }),
+      'INVALID_RECORD'
+    );
+
     expect(await db.confirmedSales.count()).toBe(0);
   });
 });
@@ -327,9 +367,9 @@ describe('payment repository, queue transitions, and reload durability', () => {
         saleId: 'cash-1',
         sourceDeviceId: 'dev-1',
         snapshot,
-        recordedAt: '2026-11-26T10:10:00Z',
-        draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-        payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 1500 },
+        recordedAt: '2026-11-27T10:10:00Z',
+        draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-2'] }],
+        payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 2500 },
       })
     );
     await repos.sales.confirmSale(
@@ -337,9 +377,9 @@ describe('payment repository, queue transitions, and reload durability', () => {
         saleId: 'cash-2',
         sourceDeviceId: 'dev-1',
         snapshot,
-        recordedAt: '2026-11-26T10:11:00Z',
-        draftLines: [{ itemId: 'milk-tea', quantity: 2, modifierIds: [] }],
-        payment: { status: 'CASH_RECORDED', receivedUnits: 3000, changeUnits: 0 },
+        recordedAt: '2026-11-27T10:11:00Z',
+        draftLines: [{ itemId: 'americano', quantity: 2, modifierIds: [] }],
+        payment: { status: 'CASH_RECORDED', receivedUnits: 20000, changeUnits: 0 },
       })
     );
     await repos.sales.confirmSale(
@@ -347,9 +387,9 @@ describe('payment repository, queue transitions, and reload durability', () => {
         saleId: 'ext-1',
         sourceDeviceId: 'dev-1',
         snapshot,
-        recordedAt: '2026-11-26T10:12:00Z',
-        draftLines: [{ itemId: 'milk-tea', quantity: 1, modifierIds: [] }],
-        payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'qr-9988' },
+        recordedAt: '2026-11-27T10:12:00Z',
+        draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+        payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'promptpay-9988' },
       })
     );
 
@@ -357,9 +397,9 @@ describe('payment repository, queue transitions, and reload durability', () => {
     expect(await repos.payments.listByStatus('EXTERNAL_UNVERIFIED')).toHaveLength(1);
     expect(await repos.payments.summarizeCashTotals()).toEqual({
       count: 2,
-      totalUnits: 6500,
-      receivedUnits: 8000,
-      changeUnits: 1500,
+      totalUnits: 27500,
+      receivedUnits: 30000,
+      changeUnits: 2500,
     });
   });
 
@@ -371,16 +411,16 @@ describe('payment repository, queue transitions, and reload durability', () => {
       saleId: 'q-1',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:20:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 3500, changeUnits: 0 },
+      recordedAt: '2026-11-27T10:20:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 0 },
     });
     const s2 = buildConfirmedSale({
       saleId: 'q-2',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T10:21:00Z',
-      draftLines: [{ itemId: 'milk-tea', quantity: 1, modifierIds: [] }],
+      recordedAt: '2026-11-27T10:21:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
       payment: { status: 'UNPAID', receivedUnits: 0 },
     });
 
@@ -396,22 +436,19 @@ describe('payment repository, queue transitions, and reload durability', () => {
       lastErrorCode: 'NETWORK_TIMEOUT',
     });
 
-    const imported = await repos.queue.markImported('q-1', 'pos-rcpt-001');
+    const imported = await repos.queue.markImported('q-1', 'BP-ORD-1');
     expect(imported).toEqual({
       saleId: 'q-1',
       payloadVersion: 1,
       state: 'IMPORTED',
       attempts: 1,
-      destinationReceiptId: 'pos-rcpt-001',
+      destinationReceiptId: 'BP-ORD-1',
     });
 
-    // Confirmed sale stays locally visible after import.
     expect(await repos.sales.getById('q-1')).toBeDefined();
-
-    // Idempotent same-receipt markImported succeeds; mismatched receipt or failure transition fails.
-    expect(await repos.queue.markImported('q-1', 'pos-rcpt-001')).toEqual(imported);
+    expect(await repos.queue.markImported('q-1', 'BP-ORD-1')).toEqual(imported);
     await expectStorageError(
-      repos.queue.markImported('q-1', 'pos-rcpt-DIFFERENT'),
+      repos.queue.markImported('q-1', 'BP-ORD-DIFFERENT'),
       'INVALID_QUEUE_TRANSITION'
     );
     await expectStorageError(
@@ -440,34 +477,33 @@ describe('payment repository, queue transitions, and reload durability', () => {
     const { db, factory, name, repos } = createTestDb();
     const deviceId = await repos.device.getOrCreateDeviceId();
     const snapshot = await repos.catalog.saveSnapshot(makeSnapshot());
-    await repos.catalog.setLocalItemAvailability(snapshot.snapshotId, 'milk-tea', false);
+    await repos.catalog.setLocalItemAvailability(snapshot.snapshotId, 'americano', false);
 
     const cashSale = buildConfirmedSale({
       saleId: 'sale-reload-01',
       sourceDeviceId: deviceId,
       snapshot,
-      recordedAt: '2026-11-26T11:00:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 2, modifierIds: ['extra-egg'] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 1600 },
+      recordedAt: '2026-11-27T11:00:00Z',
+      draftLines: [{ itemId: 'espresso', quantity: 2, modifierIds: ['option-1:choice-3'] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 20000, changeUnits: 2000 },
     });
     await repos.sales.confirmSale(cashSale);
 
-    // Simulate closing the app/browser and reopening a fresh Dexie instance against the same IndexedDB.
     db.close();
     const { repos: reloadedRepos } = createTestDb(factory, name);
 
     expect(await reloadedRepos.device.getOrCreateDeviceId()).toBe(deviceId);
     expect((await reloadedRepos.catalog.getActiveSnapshot())?.snapshotId).toBe(snapshot.snapshotId);
     expect(
-      (await reloadedRepos.catalog.getLocalUnavailableItemIds(snapshot.snapshotId)).has('milk-tea')
+      (await reloadedRepos.catalog.getLocalUnavailableItemIds(snapshot.snapshotId)).has('americano')
     ).toBe(true);
 
     const bundle = await reloadedRepos.sales.getReceiptBundle('sale-reload-01');
-    expect(bundle?.sale.totalUnits).toBe(8400);
+    expect(bundle?.sale.totalUnits).toBe(18000);
     expect(bundle?.payment.payment).toEqual({
       status: 'CASH_RECORDED',
-      receivedUnits: 10000,
-      changeUnits: 1600,
+      receivedUnits: 20000,
+      changeUnits: 2000,
     });
     expect(bundle?.queueEntry.state).toBe('PENDING');
   });

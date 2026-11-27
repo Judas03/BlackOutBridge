@@ -1,6 +1,7 @@
 import {
   CatalogItem,
   CatalogModifier,
+  CatalogOptionGroup,
   CatalogSnapshot,
   CatalogSnapshotSchema,
   ConfirmedLine,
@@ -20,6 +21,9 @@ export type PricingErrorCode =
   | 'ITEM_UNAVAILABLE'
   | 'UNKNOWN_MODIFIER'
   | 'DUPLICATE_MODIFIER'
+  | 'MULTIPLE_GROUP_SELECTIONS'
+  | 'MISSING_REQUIRED_OPTION'
+  | 'NEGATIVE_UNIT_PRICE'
   | 'INSUFFICIENT_CASH'
   | 'INVALID_CATALOG'
   | 'INVALID_SALE_INPUT';
@@ -40,13 +44,14 @@ export class DomainPricingError extends Error {
 }
 
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
 const MIN_QUANTITY = 1;
 const MAX_QUANTITY = 99;
 
 /**
- * Validates that a number is a finite, nonnegative safe integer.
+ * Validates that a number is a finite safe signed integer.
  */
-export function assertSafeNonNegativeInt(value: number, field = 'amount'): number {
+export function assertSafeSignedInt(value: number, field = 'delta'): number {
   if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
     throw new DomainPricingError('INVALID_INTEGER', `${field} must be a finite integer.`, {
       field,
@@ -59,20 +64,43 @@ export function assertSafeNonNegativeInt(value: number, field = 'amount'): numbe
       value,
     });
   }
+  if (!Number.isSafeInteger(value)) {
+    throw new DomainPricingError(
+      'INTEGER_OVERFLOW',
+      `${field} exceeds safe integer bounds.`,
+      { field, value }
+    );
+  }
+  return value;
+}
+
+/**
+ * Validates that a number is a finite, nonnegative safe integer.
+ */
+export function assertSafeNonNegativeInt(value: number, field = 'amount'): number {
+  assertSafeSignedInt(value, field);
   if (value < 0) {
     throw new DomainPricingError('NEGATIVE_AMOUNT', `${field} must be nonnegative.`, {
       field,
       value,
     });
   }
-  if (!Number.isSafeInteger(value)) {
-    throw new DomainPricingError(
-      'INTEGER_OVERFLOW',
-      `${field} exceeds Number.MAX_SAFE_INTEGER.`,
-      { field, value }
-    );
-  }
   return value;
+}
+
+/**
+ * Overflow-checked addition of two safe signed integers.
+ */
+export function safeAddSigned(a: number, b: number, field = 'sum'): number {
+  const left = assertSafeSignedInt(a, `${field}.left`);
+  const right = assertSafeSignedInt(b, `${field}.right`);
+  const result = BigInt(left) + BigInt(right);
+  if (result > MAX_SAFE_BIGINT || result < MIN_SAFE_BIGINT) {
+    throw new DomainPricingError('INTEGER_OVERFLOW', `${field} exceeds safe integer bounds.`, {
+      field,
+    });
+  }
+  return Number(result);
 }
 
 /**
@@ -147,19 +175,34 @@ function indexCatalogItems(snapshot: CatalogSnapshot): Map<string, CatalogItem> 
   return itemsById;
 }
 
-function indexModifiers(item: CatalogItem): Map<string, CatalogModifier> {
-  const modifiersById = new Map<string, CatalogModifier>();
-  for (const modifier of item.modifiers) {
-    if (modifiersById.has(modifier.modifierId)) {
+function indexOptionGroups(
+  item: CatalogItem
+): Map<string, { group: CatalogOptionGroup; choice: CatalogModifier }> {
+  const seenGroupIds = new Set<string>();
+  const byModifierId = new Map<string, { group: CatalogOptionGroup; choice: CatalogModifier }>();
+
+  for (const group of item.optionGroups) {
+    if (seenGroupIds.has(group.groupId)) {
       throw new DomainPricingError(
         'INVALID_CATALOG',
-        `Duplicate modifierId ${modifier.modifierId} on item ${item.itemId}.`,
-        { itemId: item.itemId, modifierId: modifier.modifierId }
+        `Duplicate option groupId ${group.groupId} on item ${item.itemId}.`,
+        { itemId: item.itemId, groupId: group.groupId }
       );
     }
-    modifiersById.set(modifier.modifierId, modifier);
+    seenGroupIds.add(group.groupId);
+
+    for (const choice of group.choices) {
+      if (byModifierId.has(choice.modifierId)) {
+        throw new DomainPricingError(
+          'INVALID_CATALOG',
+          `Duplicate modifierId ${choice.modifierId} on item ${item.itemId}.`,
+          { itemId: item.itemId, groupId: group.groupId, modifierId: choice.modifierId }
+        );
+      }
+      byModifierId.set(choice.modifierId, { group, choice });
+    }
   }
-  return modifiersById;
+  return byModifierId;
 }
 
 function priceDraftLineWithIndex(
@@ -190,8 +233,9 @@ function priceDraftLineWithIndex(
   }
 
   const capturedUnitPriceUnits = assertSafeNonNegativeInt(item.unitPriceUnits, 'unitPriceUnits');
-  const modifiersById = indexModifiers(item);
+  const byModifierId = indexOptionGroups(item);
   const seenModifiers = new Set<string>();
+  const selectedGroups = new Set<string>();
   let capturedModifierDeltaUnits = 0;
 
   for (const modifierId of line.modifierIds) {
@@ -207,24 +251,53 @@ function priceDraftLineWithIndex(
         { itemId: item.itemId, modifierId }
       );
     }
-    const modifier = modifiersById.get(modifierId);
-    if (!modifier) {
+    const entry = byModifierId.get(modifierId);
+    if (!entry) {
       throw new DomainPricingError(
         'UNKNOWN_MODIFIER',
         `Modifier ${modifierId} is not supported on item ${item.itemId}.`,
         { itemId: item.itemId, modifierId }
       );
     }
+    if (selectedGroups.has(entry.group.groupId)) {
+      throw new DomainPricingError(
+        'MULTIPLE_GROUP_SELECTIONS',
+        `Only one choice may be selected for option group ${entry.group.groupId} on item ${item.itemId}.`,
+        { itemId: item.itemId, groupId: entry.group.groupId, modifierId }
+      );
+    }
     seenModifiers.add(modifierId);
-    const delta = assertSafeNonNegativeInt(modifier.deltaUnits, 'modifier.deltaUnits');
-    capturedModifierDeltaUnits = safeAdd(capturedModifierDeltaUnits, delta, 'capturedModifierDeltaUnits');
+    selectedGroups.add(entry.group.groupId);
+    const delta = assertSafeSignedInt(entry.choice.deltaUnits, 'modifier.deltaUnits');
+    capturedModifierDeltaUnits = safeAddSigned(
+      capturedModifierDeltaUnits,
+      delta,
+      'capturedModifierDeltaUnits'
+    );
   }
 
-  const effectiveUnitPrice = safeAdd(
+  for (const group of item.optionGroups) {
+    if (group.required && !selectedGroups.has(group.groupId)) {
+      throw new DomainPricingError(
+        'MISSING_REQUIRED_OPTION',
+        `Required option group ${group.groupId} was not selected for item ${item.itemId}.`,
+        { itemId: item.itemId, groupId: group.groupId }
+      );
+    }
+  }
+
+  const effectiveUnitPrice = safeAddSigned(
     capturedUnitPriceUnits,
     capturedModifierDeltaUnits,
     'effectiveUnitPrice'
   );
+  if (effectiveUnitPrice < 0) {
+    throw new DomainPricingError(
+      'NEGATIVE_UNIT_PRICE',
+      `Selected options reduce unit price below zero for item ${item.itemId}.`,
+      { itemId: item.itemId, capturedUnitPriceUnits, capturedModifierDeltaUnits, effectiveUnitPrice }
+    );
+  }
   const lineTotalUnits = safeMultiply(quantity, effectiveUnitPrice, 'lineTotalUnits');
 
   return {
@@ -277,7 +350,7 @@ export function priceCart(
 }
 
 /**
- * Computes exact cash change in whole kyat units, rejecting underpayment and overflow.
+ * Computes exact cash change in minor currency units, rejecting underpayment and overflow.
  */
 export function calculateCashPayment(
   totalUnits: number,

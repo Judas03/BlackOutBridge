@@ -12,43 +12,68 @@ import {
   priceCart,
   priceDraftLine,
   safeAdd,
+  safeAddSigned,
   safeMultiply,
 } from '../src/domain';
 
 function makeSnapshot(overrides?: Partial<CatalogSnapshot>): CatalogSnapshot {
   return {
-    currency: 'MMK',
-    scale: 0,
-    snapshotId: 'snap-2026-11-26-01',
-    sourcePosId: 'pos-main-01',
-    issuedAt: '2026-11-26T08:00:00Z',
+    currency: 'THB',
+    scale: 2,
+    snapshotId: 'snap-2026-11-27-01',
+    sourcePosId: 'brew-points-pos-1',
+    issuedAt: '2026-11-27T08:00:00Z',
     items: [
       {
-        itemId: 'mohinga',
-        name: 'Mohinga',
-        aliases: ['fish noodle'],
-        unitPriceUnits: 3500,
+        itemId: 'espresso',
+        name: 'Espresso',
+        aliases: ['espresso'],
+        unitPriceUnits: 7500,
         available: true,
-        modifiers: [
-          { modifierId: 'extra-egg', name: 'Boiled Egg', deltaUnits: 700 },
-          { modifierId: 'extra-fritter', name: 'Crispy Fritter', deltaUnits: 500 },
+        optionGroups: [
+          {
+            groupId: 'option-1',
+            name: 'Size',
+            required: true,
+            choices: [
+              { modifierId: 'option-1:choice-1', name: 'Small', deltaUnits: -1000 },
+              { modifierId: 'option-1:choice-2', name: 'Regular', deltaUnits: 0 },
+              { modifierId: 'option-1:choice-3', name: 'Large', deltaUnits: 1500 },
+            ],
+          },
+          {
+            groupId: 'option-2',
+            name: 'Milk & Extras',
+            required: false,
+            choices: [
+              { modifierId: 'option-2:choice-1', name: 'Oat Milk', deltaUnits: 2000 },
+              { modifierId: 'option-2:choice-2', name: 'Extra Shot', deltaUnits: 2500 },
+            ],
+          },
         ],
       },
       {
-        itemId: 'milk-tea',
-        name: 'Burmese Milk Tea',
-        aliases: ['laphet yay'],
-        unitPriceUnits: 1500,
+        itemId: 'americano',
+        name: 'Americano',
+        aliases: ['black coffee'],
+        unitPriceUnits: 10000,
         available: true,
-        modifiers: [{ modifierId: 'less-sugar', name: 'Less Sugar', deltaUnits: 0 }],
+        optionGroups: [
+          {
+            groupId: 'option-1',
+            name: 'Ice',
+            required: false,
+            choices: [{ modifierId: 'option-1:choice-1', name: 'Less Ice', deltaUnits: 0 }],
+          },
+        ],
       },
       {
-        itemId: 'shan-noodles',
-        name: 'Shan Noodles',
+        itemId: 'matcha_latte',
+        name: 'Matcha Latte',
         aliases: [],
-        unitPriceUnits: 4000,
+        unitPriceUnits: 15000,
         available: false,
-        modifiers: [],
+        optionGroups: [],
       },
     ],
     ...overrides,
@@ -66,27 +91,48 @@ function expectPricingError(fn: () => unknown, expectedCode: DomainPricingError[
 }
 
 describe('quantities and line pricing', () => {
-  it('prices valid boundary quantities 1 and 99 with modifiers', () => {
+  it('prices valid boundary quantities 1 and 99 with grouped options and signed deltas', () => {
     const snapshot = makeSnapshot();
 
     const single = priceDraftLine(
-      { itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg', 'extra-fritter'] },
+      {
+        itemId: 'espresso',
+        quantity: 1,
+        modifierIds: ['option-1:choice-3', 'option-2:choice-1'],
+      },
       snapshot
     );
     expect(single).toEqual({
-      itemId: 'mohinga',
+      itemId: 'espresso',
       quantity: 1,
-      modifierIds: ['extra-egg', 'extra-fritter'],
-      capturedUnitPriceUnits: 3500,
-      capturedModifierDeltaUnits: 1200,
-      lineTotalUnits: 4700,
+      modifierIds: ['option-1:choice-3', 'option-2:choice-1'],
+      capturedUnitPriceUnits: 7500,
+      capturedModifierDeltaUnits: 3500,
+      lineTotalUnits: 11000,
+    });
+
+    const discountedSmall = priceDraftLine(
+      {
+        itemId: 'espresso',
+        quantity: 2,
+        modifierIds: ['option-1:choice-1'],
+      },
+      snapshot
+    );
+    expect(discountedSmall).toEqual({
+      itemId: 'espresso',
+      quantity: 2,
+      modifierIds: ['option-1:choice-1'],
+      capturedUnitPriceUnits: 7500,
+      capturedModifierDeltaUnits: -1000,
+      lineTotalUnits: 13000,
     });
 
     const bulk = priceDraftLine(
-      { itemId: 'milk-tea', quantity: 99, modifierIds: ['less-sugar'] },
+      { itemId: 'americano', quantity: 99, modifierIds: ['option-1:choice-1'] },
       snapshot
     );
-    expect(bulk.lineTotalUnits).toBe(99 * 1500);
+    expect(bulk.lineTotalUnits).toBe(99 * 10000);
   });
 
   it.each([0, -1, 100, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
@@ -94,20 +140,56 @@ describe('quantities and line pricing', () => {
     badQuantity => {
       const snapshot = makeSnapshot();
       expectPricingError(
-        () => priceDraftLine({ itemId: 'mohinga', quantity: badQuantity, modifierIds: [] }, snapshot),
+        () =>
+          priceDraftLine(
+            { itemId: 'americano', quantity: badQuantity, modifierIds: [] },
+            snapshot
+          ),
         'INVALID_QUANTITY'
       );
     }
   );
 });
 
-describe('modifiers and item availability', () => {
+describe('grouped options, negative deltas, and item availability', () => {
+  it('rejects missing required option groups', () => {
+    const snapshot = makeSnapshot();
+    expectPricingError(
+      () =>
+        priceDraftLine(
+          { itemId: 'espresso', quantity: 1, modifierIds: ['option-2:choice-1'] },
+          snapshot
+        ),
+      'MISSING_REQUIRED_OPTION'
+    );
+  });
+
+  it('rejects multiple selections from the same option group', () => {
+    const snapshot = makeSnapshot();
+    expectPricingError(
+      () =>
+        priceDraftLine(
+          {
+            itemId: 'espresso',
+            quantity: 1,
+            modifierIds: ['option-1:choice-1', 'option-1:choice-3'],
+          },
+          snapshot
+        ),
+      'MULTIPLE_GROUP_SELECTIONS'
+    );
+  });
+
   it('rejects duplicate modifiers on the same line', () => {
     const snapshot = makeSnapshot();
     expectPricingError(
       () =>
         priceDraftLine(
-          { itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg', 'extra-egg'] },
+          {
+            itemId: 'espresso',
+            quantity: 1,
+            modifierIds: ['option-1:choice-2', 'option-1:choice-2'],
+          },
           snapshot
         ),
       'DUPLICATE_MODIFIER'
@@ -119,7 +201,7 @@ describe('modifiers and item availability', () => {
     expectPricingError(
       () =>
         priceDraftLine(
-          { itemId: 'milk-tea', quantity: 1, modifierIds: ['extra-egg'] },
+          { itemId: 'americano', quantity: 1, modifierIds: ['option-2:choice-1'] },
           snapshot
         ),
       'UNKNOWN_MODIFIER'
@@ -127,28 +209,102 @@ describe('modifiers and item availability', () => {
     expectPricingError(
       () =>
         priceDraftLine(
-          { itemId: 'mohinga', quantity: 1, modifierIds: ['nonexistent-mod'] },
+          { itemId: 'espresso', quantity: 1, modifierIds: ['nonexistent-mod'] },
           snapshot
         ),
       'UNKNOWN_MODIFIER'
     );
   });
 
-  it('rejects negative modifier delta in catalog snapshot', () => {
-    const badSnapshot = makeSnapshot({
+  it('rejects negative effective unit price when negative deltas exceed base price', () => {
+    const snapshot = makeSnapshot({
       items: [
         {
-          itemId: 'mohinga',
-          name: 'Mohinga',
+          itemId: 'espresso',
+          name: 'Espresso',
           aliases: [],
-          unitPriceUnits: 3500,
+          unitPriceUnits: 1000,
           available: true,
-          modifiers: [{ modifierId: 'discount', name: 'Bad Negative', deltaUnits: -100 }],
+          optionGroups: [
+            {
+              groupId: 'option-1',
+              name: 'Size',
+              required: true,
+              choices: [{ modifierId: 'option-1:choice-1', name: 'Tiny', deltaUnits: -1500 }],
+            },
+          ],
         },
       ],
     });
     expectPricingError(
-      () => priceDraftLine({ itemId: 'mohinga', quantity: 1, modifierIds: ['discount'] }, badSnapshot),
+      () =>
+        priceDraftLine(
+          { itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-1'] },
+          snapshot
+        ),
+      'NEGATIVE_UNIT_PRICE'
+    );
+  });
+
+  it('rejects duplicate groupId or duplicate modifierId across groups in catalog snapshot', () => {
+    const dupGroupSnapshot = makeSnapshot({
+      items: [
+        {
+          itemId: 'espresso',
+          name: 'Espresso',
+          aliases: [],
+          unitPriceUnits: 7500,
+          available: true,
+          optionGroups: [
+            {
+              groupId: 'option-1',
+              name: 'Size',
+              required: false,
+              choices: [{ modifierId: 'option-1:choice-1', name: 'Small', deltaUnits: 0 }],
+            },
+            {
+              groupId: 'option-1',
+              name: 'Temp',
+              required: false,
+              choices: [{ modifierId: 'option-2:choice-1', name: 'Hot', deltaUnits: 0 }],
+            },
+          ],
+        },
+      ],
+    });
+    expectPricingError(
+      () => priceDraftLine({ itemId: 'espresso', quantity: 1, modifierIds: [] }, dupGroupSnapshot),
+      'INVALID_CATALOG'
+    );
+
+    const dupModifierSnapshot = makeSnapshot({
+      items: [
+        {
+          itemId: 'espresso',
+          name: 'Espresso',
+          aliases: [],
+          unitPriceUnits: 7500,
+          available: true,
+          optionGroups: [
+            {
+              groupId: 'option-1',
+              name: 'Size',
+              required: false,
+              choices: [{ modifierId: 'shared-id', name: 'Small', deltaUnits: 0 }],
+            },
+            {
+              groupId: 'option-2',
+              name: 'Temp',
+              required: false,
+              choices: [{ modifierId: 'shared-id', name: 'Hot', deltaUnits: 0 }],
+            },
+          ],
+        },
+      ],
+    });
+    expectPricingError(
+      () =>
+        priceDraftLine({ itemId: 'espresso', quantity: 1, modifierIds: [] }, dupModifierSnapshot),
       'INVALID_CATALOG'
     );
   });
@@ -160,15 +316,15 @@ describe('modifiers and item availability', () => {
       'UNKNOWN_ITEM'
     );
     expectPricingError(
-      () => priceDraftLine({ itemId: 'shan-noodles', quantity: 1, modifierIds: [] }, snapshot),
+      () => priceDraftLine({ itemId: 'matcha_latte', quantity: 1, modifierIds: [] }, snapshot),
       'ITEM_UNAVAILABLE'
     );
     expectPricingError(
       () =>
         priceDraftLine(
-          { itemId: 'mohinga', quantity: 1, modifierIds: [] },
+          { itemId: 'americano', quantity: 1, modifierIds: [] },
           snapshot,
-          new Set(['mohinga'])
+          new Set(['americano'])
         ),
       'ITEM_UNAVAILABLE'
     );
@@ -176,35 +332,35 @@ describe('modifiers and item availability', () => {
 });
 
 describe('cart totals and cash change', () => {
-  it('computes exact multi-line totals and rejects empty carts', () => {
+  it('computes exact multi-line totals in THB satang and rejects empty carts', () => {
     const snapshot = makeSnapshot();
     const result = priceCart(
       [
-        { itemId: 'mohinga', quantity: 2, modifierIds: ['extra-egg'] },
-        { itemId: 'milk-tea', quantity: 3, modifierIds: [] },
+        { itemId: 'espresso', quantity: 2, modifierIds: ['option-1:choice-1'] },
+        { itemId: 'americano', quantity: 3, modifierIds: [] },
       ],
       snapshot
     );
     expect(result.lines).toHaveLength(2);
-    expect(result.totalUnits).toBe(2 * (3500 + 700) + 3 * 1500);
+    expect(result.totalUnits).toBe(2 * (7500 - 1000) + 3 * 10000);
 
     expectPricingError(() => priceCart([], snapshot), 'EMPTY_CART');
   });
 
   it('computes exact cash payment and overpayment change, and rejects insufficient cash', () => {
-    expect(calculateCashPayment(8400, 8400)).toEqual({
+    expect(calculateCashPayment(43000, 43000)).toEqual({
       status: 'CASH_RECORDED',
-      receivedUnits: 8400,
+      receivedUnits: 43000,
       changeUnits: 0,
     });
 
-    expect(calculateCashPayment(8400, 10000)).toEqual({
+    expect(calculateCashPayment(43000, 50000)).toEqual({
       status: 'CASH_RECORDED',
-      receivedUnits: 10000,
-      changeUnits: 1600,
+      receivedUnits: 50000,
+      changeUnits: 7000,
     });
 
-    expectPricingError(() => calculateCashPayment(8400, 8399), 'INSUFFICIENT_CASH');
+    expectPricingError(() => calculateCashPayment(43000, 42999), 'INSUFFICIENT_CASH');
   });
 
   it.each([-1, 100.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
@@ -222,9 +378,11 @@ describe('cart totals and cash change', () => {
 });
 
 describe('integer overflow protection', () => {
-  it('rejects safeAdd and safeMultiply overflow at Number.MAX_SAFE_INTEGER', () => {
+  it('rejects safeAdd, safeAddSigned, and safeMultiply overflow at safe integer bounds', () => {
     expect(safeAdd(Number.MAX_SAFE_INTEGER, 0)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(safeAddSigned(5000, -1000)).toBe(4000);
     expectPricingError(() => safeAdd(Number.MAX_SAFE_INTEGER, 1), 'INTEGER_OVERFLOW');
+    expectPricingError(() => safeAddSigned(Number.MIN_SAFE_INTEGER, -1), 'INTEGER_OVERFLOW');
     expectPricingError(() => safeMultiply(Number.MAX_SAFE_INTEGER, 2), 'INTEGER_OVERFLOW');
   });
 
@@ -238,7 +396,7 @@ describe('integer overflow protection', () => {
           aliases: [],
           unitPriceUnits: halfMax,
           available: true,
-          modifiers: [],
+          optionGroups: [],
         },
         {
           itemId: 'extra-item',
@@ -246,7 +404,7 @@ describe('integer overflow protection', () => {
           aliases: [],
           unitPriceUnits: 100,
           available: true,
-          modifiers: [],
+          optionGroups: [],
         },
       ],
     });
@@ -271,9 +429,9 @@ describe('integer overflow protection', () => {
 });
 
 describe('contract schemas and authority boundaries', () => {
-  it('rejects unknown authority fields on DraftLineSchema and ConfirmedSaleSchema', () => {
+  it('rejects unknown authority fields and non-THB/scale-2 money configs on schemas', () => {
     const badDraft = DraftLineSchema.safeParse({
-      itemId: 'mohinga',
+      itemId: 'americano',
       quantity: 1,
       modifierIds: [],
       unitPriceUnits: 1,
@@ -285,17 +443,17 @@ describe('contract schemas and authority boundaries', () => {
       saleId: 'sale-001',
       sourceDeviceId: 'device-001',
       snapshot,
-      recordedAt: '2026-11-26T08:15:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 1500 },
+      recordedAt: '2026-11-27T08:15:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+      payment: { status: 'CASH_RECORDED', receivedUnits: 12000, changeUnits: 2000 },
     });
 
     expect(ConfirmedSaleSchema.safeParse(sale).success).toBe(true);
     expect(ConfirmedSaleSchema.safeParse({ ...sale, tenantId: 'hijacked-tenant' }).success).toBe(
       false
     );
-    expect(ConfirmedSaleSchema.safeParse({ ...sale, currency: 'USD' }).success).toBe(false);
-    expect(ConfirmedSaleSchema.safeParse({ ...sale, scale: 2 }).success).toBe(false);
+    expect(ConfirmedSaleSchema.safeParse({ ...sale, currency: 'MMK' }).success).toBe(false);
+    expect(ConfirmedSaleSchema.safeParse({ ...sale, scale: 0 }).success).toBe(false);
     expect(ConfirmedSaleSchema.safeParse({ ...sale, lines: [] }).success).toBe(false);
     expect(
       ConfirmedSaleSchema.safeParse({
@@ -313,9 +471,9 @@ describe('contract schemas and authority boundaries', () => {
           saleId: 'sale-002',
           sourceDeviceId: 'device-001',
           snapshot,
-          recordedAt: '2026-11-26T08:15:00Z',
-          draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-          payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 9999 },
+          recordedAt: '2026-11-27T08:15:00Z',
+          draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+          payment: { status: 'CASH_RECORDED', receivedUnits: 12000, changeUnits: 9999 },
         }),
       'INVALID_SALE_INPUT'
     );
@@ -326,9 +484,9 @@ describe('contract schemas and authority boundaries', () => {
           saleId: 'sale-003',
           sourceDeviceId: 'device-001',
           snapshot,
-          recordedAt: '2026-11-26T08:15:00Z',
-          draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-          payment: { status: 'CASH_RECORDED', receivedUnits: 1000, changeUnits: 0 },
+          recordedAt: '2026-11-27T08:15:00Z',
+          draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
+          payment: { status: 'CASH_RECORDED', receivedUnits: 5000, changeUnits: 0 },
         }),
       'INSUFFICIENT_CASH'
     );
@@ -336,47 +494,47 @@ describe('contract schemas and authority boundaries', () => {
 });
 
 describe('canonical payload serialization and SHA-256 digest', () => {
-  it('produces identical digests regardless of JS object property insertion order', async () => {
+  it('produces identical digests regardless of JS object property insertion order, including negative deltas', async () => {
     const saleA: ConfirmedSale = {
-      currency: 'MMK',
-      scale: 0,
+      currency: 'THB',
+      scale: 2,
       saleId: 'sale-digest-1',
       sourceDeviceId: 'dev-1',
       snapshotId: 'snap-1',
-      recordedAt: '2026-11-26T09:00:00Z',
+      recordedAt: '2026-11-27T09:00:00Z',
       lines: [
         {
-          itemId: 'mohinga',
+          itemId: 'espresso',
           quantity: 2,
-          modifierIds: ['extra-egg'],
-          capturedUnitPriceUnits: 3500,
-          capturedModifierDeltaUnits: 700,
-          lineTotalUnits: 8400,
+          modifierIds: ['option-1:choice-1'],
+          capturedUnitPriceUnits: 7500,
+          capturedModifierDeltaUnits: -1000,
+          lineTotalUnits: 13000,
         },
       ],
-      totalUnits: 8400,
-      payment: { status: 'CASH_RECORDED', receivedUnits: 10000, changeUnits: 1600 },
+      totalUnits: 13000,
+      payment: { status: 'CASH_RECORDED', receivedUnits: 20000, changeUnits: 7000 },
     };
 
     const saleB: ConfirmedSale = {
-      payment: { changeUnits: 1600, receivedUnits: 10000, status: 'CASH_RECORDED' },
-      totalUnits: 8400,
-      recordedAt: '2026-11-26T09:00:00Z',
+      payment: { changeUnits: 7000, receivedUnits: 20000, status: 'CASH_RECORDED' },
+      totalUnits: 13000,
+      recordedAt: '2026-11-27T09:00:00Z',
       snapshotId: 'snap-1',
       lines: [
         {
-          lineTotalUnits: 8400,
-          capturedModifierDeltaUnits: 700,
-          capturedUnitPriceUnits: 3500,
-          modifierIds: ['extra-egg'],
+          lineTotalUnits: 13000,
+          capturedModifierDeltaUnits: -1000,
+          capturedUnitPriceUnits: 7500,
+          modifierIds: ['option-1:choice-1'],
           quantity: 2,
-          itemId: 'mohinga',
+          itemId: 'espresso',
         },
       ],
       sourceDeviceId: 'dev-1',
       saleId: 'sale-digest-1',
-      scale: 0,
-      currency: 'MMK',
+      scale: 2,
+      currency: 'THB',
     };
 
     expect(canonicalizeSalePayload(saleA)).toBe(canonicalizeSalePayload(saleB));
@@ -392,9 +550,9 @@ describe('canonical payload serialization and SHA-256 digest', () => {
       saleId: 'sale-digest-2',
       sourceDeviceId: 'dev-1',
       snapshot,
-      recordedAt: '2026-11-26T09:00:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg'] }],
-      payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'kpay-ref-01' },
+      recordedAt: '2026-11-27T09:00:00Z',
+      draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-3'] }],
+      payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'promptpay-ref-01' },
     });
 
     const baseDigest = await computeSaleDigest(baseSale);
@@ -402,7 +560,11 @@ describe('canonical payload serialization and SHA-256 digest', () => {
     const mutatedTotal = { ...baseSale, totalUnits: baseSale.totalUnits + 1 };
     const mutatedPayment = {
       ...baseSale,
-      payment: { status: 'EXTERNAL_UNVERIFIED' as const, receivedUnits: 0 as const, reference: 'kpay-ref-02' },
+      payment: {
+        status: 'EXTERNAL_UNVERIFIED' as const,
+        receivedUnits: 0 as const,
+        reference: 'promptpay-ref-02',
+      },
     };
     const mutatedQty = {
       ...baseSale,

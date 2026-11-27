@@ -10,6 +10,7 @@ import {
   QueueEntrySchema,
   QueueState,
   safeAdd,
+  safeAddSigned,
   safeMultiply,
 } from '../domain';
 import {
@@ -73,11 +74,17 @@ function validateConfirmedSaleIntegrity(sale: ConfirmedSale): ConfirmedSale {
   try {
     let computedTotal = 0;
     for (const line of validated.lines) {
-      const effectiveUnit = safeAdd(
+      const effectiveUnit = safeAddSigned(
         line.capturedUnitPriceUnits,
         line.capturedModifierDeltaUnits,
         'effectiveUnit'
       );
+      if (effectiveUnit < 0) {
+        throw new StorageError('INVALID_RECORD', 'Confirmed line effective unit price is negative.', {
+          itemId: line.itemId,
+          effectiveUnit,
+        });
+      }
       const expectedLineTotal = safeMultiply(line.quantity, effectiveUnit, 'lineTotalUnits');
       if (line.lineTotalUnits !== expectedLineTotal) {
         throw new StorageError('INVALID_RECORD', 'Confirmed line total mismatch.', {
