@@ -56,9 +56,9 @@ SDK support for local inference, initial model download, and offline App Check b
 
 ## Checkout and money
 
-All authoritative amounts come from the approved catalog and deterministic code. The initial business configuration uses whole Myanmar kyat units, with `currency = MMK` and application `scale = 0`. This is the application's whole-kyat recording convention, not a claim about the currency's official minor-unit definition. All amounts must be safe nonnegative integers; reject overflow.
+All authoritative amounts come from the approved catalog and deterministic code. The business configuration uses Thai baht minor units (satang), with `currency = THB` and application `scale = 2` (for example, `7500` satang = `฿75.00`). All base prices, line totals, and bill totals must be safe nonnegative integers; reject overflow.
 
-Support item quantities, approved modifier price deltas, totals, cash received, and change. Initial prices are final catalog prices; discounts, tax calculation, service charges, mixed tenders, refunds, and edits to already open POS checks are outside the first release. An overpayment produces change only in the cash workflow. Insufficient cash must remain unpaid unless the cashier revises the entry.
+Support item quantities, grouped/required option selections with signed approved modifier price deltas (requiring nonnegative effective unit price), totals, cash received, and change. Initial prices are final catalog prices; discounts, tax calculation, service charges, mixed tenders, refunds, and edits to already open POS checks are outside the first release. An overpayment produces change only in the cash workflow. Insufficient cash must remain unpaid unless the cashier revises the entry.
 
 The cashier confirms the complete cart. Save the sale, cash record, and queue entry in a single IndexedDB transaction. Display a saved receipt only after that transaction succeeds. Keep confirmed financial records immutable; errors become visible manager-review exceptions rather than silent overwrites or deletion.
 

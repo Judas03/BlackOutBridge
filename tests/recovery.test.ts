@@ -39,30 +39,51 @@ function createTestEnv(name = 'test-recovery') {
 
 function makeCatalogSnapshot(overrides?: Partial<CatalogSnapshot>): CatalogSnapshot {
   return {
-    currency: 'MMK',
-    scale: 0,
-    snapshotId: 'snap-2026-11-26-01',
-    sourcePosId: 'pos-yangon-01',
-    issuedAt: '2026-11-26T08:00:00Z',
+    currency: 'THB',
+    scale: 2,
+    snapshotId: 'snap-2026-11-27-01',
+    sourcePosId: 'brew-points-pos-1',
+    issuedAt: '2026-11-27T08:00:00Z',
     items: [
       {
-        itemId: 'mohinga',
-        name: 'Mohinga',
-        aliases: ['fish noodle'],
-        unitPriceUnits: 3500,
+        itemId: 'espresso',
+        name: 'Espresso',
+        aliases: ['espresso'],
+        unitPriceUnits: 7500,
         available: true,
-        modifiers: [
-          { modifierId: 'extra-egg', name: 'Boiled Egg', deltaUnits: 700 },
-          { modifierId: 'extra-fritter', name: 'Gourd Fritter', deltaUnits: 500 },
+        optionGroups: [
+          {
+            groupId: 'option-1',
+            name: 'Size',
+            required: true,
+            choices: [
+              { modifierId: 'option-1:choice-1', name: 'Small', deltaUnits: -1000 },
+              { modifierId: 'option-1:choice-2', name: 'Regular', deltaUnits: 0 },
+              { modifierId: 'option-1:choice-3', name: 'Large', deltaUnits: 1500 },
+            ],
+          },
+          {
+            groupId: 'option-2',
+            name: 'Extras',
+            required: false,
+            choices: [{ modifierId: 'option-2:choice-1', name: 'Extra Shot', deltaUnits: 2000 }],
+          },
         ],
       },
       {
-        itemId: 'milk-tea',
-        name: 'Burmese Milk Tea',
-        aliases: ['laphet yay'],
-        unitPriceUnits: 1500,
+        itemId: 'americano',
+        name: 'Americano',
+        aliases: ['black coffee'],
+        unitPriceUnits: 10000,
         available: true,
-        modifiers: [{ modifierId: 'iced', name: 'Iced', deltaUnits: 300 }],
+        optionGroups: [
+          {
+            groupId: 'option-1',
+            name: 'Ice',
+            required: false,
+            choices: [{ modifierId: 'option-1:choice-1', name: 'Iced', deltaUnits: 0 }],
+          },
+        ],
       },
     ],
     ...overrides,
@@ -80,13 +101,13 @@ function makeValidCashSale(
   }
 ): ConfirmedSale {
   const draftLines: DraftLine[] = options?.draftLines ?? [
-    { itemId: 'mohinga', quantity: 1, modifierIds: ['extra-egg'] },
+    { itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-3'] },
   ];
   const base = buildConfirmedSale({
     saleId,
     sourceDeviceId,
     snapshot,
-    recordedAt: options?.recordedAt ?? '2026-11-26T09:15:00Z',
+    recordedAt: options?.recordedAt ?? '2026-11-27T09:15:00Z',
     draftLines,
     payment: { status: 'UNPAID', receivedUnits: 0 },
   });
@@ -95,7 +116,7 @@ function makeValidCashSale(
     saleId,
     sourceDeviceId,
     snapshot,
-    recordedAt: options?.recordedAt ?? '2026-11-26T09:15:00Z',
+    recordedAt: options?.recordedAt ?? '2026-11-27T09:15:00Z',
     draftLines,
     payment: {
       status: 'CASH_RECORDED',
@@ -272,24 +293,54 @@ class InMemoryPosTestServer {
         issues.push('PRICE_MISMATCH');
       }
 
-      const modifiersById = new Map(item.modifiers.map(mod => [mod.modifierId, mod]));
-      let expectedDelta = 0;
-      let missingModifier = false;
-      for (const modId of line.modifierIds) {
-        const mod = modifiersById.get(modId);
-        if (!mod) {
-          issues.push('UNSUPPORTED_MODIFIER');
-          missingModifier = true;
-        } else {
-          expectedDelta += mod.deltaUnits;
+      const byModifierId = new Map<string, { groupId: string; deltaUnits: number }>();
+      for (const group of item.optionGroups) {
+        for (const choice of group.choices) {
+          byModifierId.set(choice.modifierId, {
+            groupId: group.groupId,
+            deltaUnits: choice.deltaUnits,
+          });
         }
       }
-      if (!missingModifier && line.capturedModifierDeltaUnits !== expectedDelta) {
+
+      let expectedDelta = 0;
+      let missingOrBadModifier = false;
+      const seenModifiers = new Set<string>();
+      const selectedGroups = new Set<string>();
+      for (const modId of line.modifierIds) {
+        if (seenModifiers.has(modId)) {
+          issues.push('UNSUPPORTED_MODIFIER');
+          missingOrBadModifier = true;
+          continue;
+        }
+        const entry = byModifierId.get(modId);
+        if (!entry) {
+          issues.push('UNSUPPORTED_MODIFIER');
+          missingOrBadModifier = true;
+        } else if (selectedGroups.has(entry.groupId)) {
+          issues.push('UNSUPPORTED_MODIFIER');
+          missingOrBadModifier = true;
+        } else {
+          seenModifiers.add(modId);
+          selectedGroups.add(entry.groupId);
+          expectedDelta += entry.deltaUnits;
+        }
+      }
+      for (const group of item.optionGroups) {
+        if (group.required && !selectedGroups.has(group.groupId)) {
+          issues.push('MISSING_REQUIRED_OPTION');
+          missingOrBadModifier = true;
+        }
+      }
+      if (!missingOrBadModifier && line.capturedModifierDeltaUnits !== expectedDelta) {
         issues.push('PRICE_MISMATCH');
       }
 
-      const expectedLineTotal =
-        line.quantity * (line.capturedUnitPriceUnits + line.capturedModifierDeltaUnits);
+      const effectiveUnit = line.capturedUnitPriceUnits + line.capturedModifierDeltaUnits;
+      if (effectiveUnit < 0) {
+        issues.push('PRICE_MISMATCH');
+      }
+      const expectedLineTotal = line.quantity * effectiveUnit;
       if (line.lineTotalUnits !== expectedLineTotal) {
         issues.push('TOTAL_MISMATCH');
       }
@@ -534,7 +585,7 @@ describe('POS connector and durable recovery engine', () => {
     expect((await storage.catalog.getActiveSnapshot())?.snapshotId).toBe(snapshot.snapshotId);
 
     const deviceId = await storage.device.getOrCreateDeviceId();
-    const sale = makeValidCashSale(snapshot, 'sale-happy-01', deviceId, { receivedUnits: 5000 });
+    const sale = makeValidCashSale(snapshot, 'sale-happy-01', deviceId, { receivedUnits: 10000 });
     await storage.sales.confirmSale(sale);
 
     const preview = await engine.previewPending();
@@ -729,7 +780,7 @@ describe('POS connector and durable recovery engine', () => {
 
     // Local device records a different order under the same (sourceDeviceId, saleId).
     const altered = makeValidCashSale(snapshot, 'sale-conflict-01', deviceId, {
-      draftLines: [{ itemId: 'milk-tea', quantity: 2, modifierIds: [] }],
+      draftLines: [{ itemId: 'americano', quantity: 2, modifierIds: [] }],
     });
     await storage.sales.confirmSale(altered);
 
@@ -868,17 +919,17 @@ describe('POS connector and durable recovery engine', () => {
       items: [
         ...serverSnapshot.items,
         {
-          itemId: 'shan-noodles',
-          name: 'Shan Noodles',
+          itemId: 'matcha_latte',
+          name: 'Matcha Latte',
           aliases: [],
-          unitPriceUnits: 3200,
+          unitPriceUnits: 15000,
           available: true,
-          modifiers: [],
+          optionGroups: [],
         },
       ],
     });
     const unknownItemSale = makeValidCashSale(staleCatalogWithRemovedItem, 'sale-unknown-item', deviceId, {
-      draftLines: [{ itemId: 'shan-noodles', quantity: 1, modifierIds: [] }],
+      draftLines: [{ itemId: 'matcha_latte', quantity: 1, modifierIds: [] }],
     });
 
     // 2. UNSUPPORTED_MODIFIER
@@ -886,9 +937,15 @@ describe('POS connector and durable recovery engine', () => {
       items: [
         {
           ...serverSnapshot.items[0],
-          modifiers: [
-            ...serverSnapshot.items[0].modifiers,
-            { modifierId: 'legacy-chili', name: 'Legacy Chili', deltaUnits: 200 },
+          optionGroups: [
+            serverSnapshot.items[0].optionGroups[0],
+            {
+              ...serverSnapshot.items[0].optionGroups[1],
+              choices: [
+                ...serverSnapshot.items[0].optionGroups[1].choices,
+                { modifierId: 'option-2:choice-9', name: 'Legacy Syrup', deltaUnits: 500 },
+              ],
+            },
           ],
         },
         serverSnapshot.items[1],
@@ -898,42 +955,81 @@ describe('POS connector and durable recovery engine', () => {
       staleCatalogWithExtraMod,
       'sale-unsupported-mod',
       deviceId,
-      { draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: ['legacy-chili'] }] }
+      {
+        draftLines: [
+          {
+            itemId: 'espresso',
+            quantity: 1,
+            modifierIds: ['option-1:choice-2', 'option-2:choice-9'],
+          },
+        ],
+      }
     );
 
-    // 3. SNAPSHOT_MISSING
+    // 3. MISSING_REQUIRED_OPTION (local snapshot marked group optional, backend snapshot requires it)
+    const optionalGroupSnapshot = makeCatalogSnapshot({
+      items: [
+        {
+          ...serverSnapshot.items[0],
+          optionGroups: [
+            { ...serverSnapshot.items[0].optionGroups[0], required: false },
+            serverSnapshot.items[0].optionGroups[1],
+          ],
+        },
+        serverSnapshot.items[1],
+      ],
+    });
+    const missingRequiredSale = makeValidCashSale(
+      optionalGroupSnapshot,
+      'sale-missing-required',
+      deviceId,
+      {
+        draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: [] }],
+      }
+    );
+
+    // 4. SNAPSHOT_MISSING
     const missingSnapshot = makeCatalogSnapshot({ snapshotId: 'snap-missing-on-server' });
     const missingSnapSale = makeValidCashSale(missingSnapshot, 'sale-missing-snap', deviceId);
 
-    // 4. PRICE_MISMATCH (both base unit price drift and modifier delta drift)
+    // 5. PRICE_MISMATCH (both base unit price drift and signed modifier delta drift)
     const driftedPriceSnapshot = makeCatalogSnapshot({
       items: [
         {
           ...serverSnapshot.items[0],
-          unitPriceUnits: 3800,
-          modifiers: [{ modifierId: 'extra-egg', name: 'Boiled Egg', deltaUnits: 900 }],
+          unitPriceUnits: 8000,
+          optionGroups: [
+            {
+              groupId: 'option-1',
+              name: 'Size',
+              required: true,
+              choices: [{ modifierId: 'option-1:choice-3', name: 'Large', deltaUnits: 2000 }],
+            },
+          ],
         },
       ],
     });
     const priceMismatchSale = makeValidCashSale(driftedPriceSnapshot, 'sale-price-mismatch', deviceId);
 
-    // 5. TOTAL_MISMATCH (detected via backend total verification)
+    // 6. TOTAL_MISMATCH (detected via backend total verification)
     const baseValid = makeValidCashSale(serverSnapshot, 'sale-total-mismatch', deviceId);
-    // Construct a sale that fails backend line/total check by tweaking server custom validation?
-    // Even better: send a sale whose line prices match snapshot, then verify storage requires valid
-    // arithmetic locally while backend checks lineTotalUnits against its own math (or simulate
-    // backend reporting TOTAL_MISMATCH for altered snapshot rule). Here we simulate a snapshot
-    // item price mismatch cleared only on total, or use server's TOTAL_MISMATCH check cleanly:
     const mismatchSnapshot = makeCatalogSnapshot({
       snapshotId: 'snap-total-mismatch',
       items: [
         {
-          itemId: 'mohinga',
-          name: 'Mohinga',
+          itemId: 'espresso',
+          name: 'Espresso',
           aliases: [],
-          unitPriceUnits: 3500,
+          unitPriceUnits: 7500,
           available: true,
-          modifiers: [{ modifierId: 'extra-egg', name: 'Boiled Egg', deltaUnits: 700 }],
+          optionGroups: [
+            {
+              groupId: 'option-1',
+              name: 'Size',
+              required: true,
+              choices: [{ modifierId: 'option-1:choice-3', name: 'Large', deltaUnits: 1500 }],
+            },
+          ],
         },
       ],
     });
@@ -944,6 +1040,7 @@ describe('POS connector and durable recovery engine', () => {
     const allDriftSales = [
       unknownItemSale,
       unsupportedModSale,
+      missingRequiredSale,
       missingSnapSale,
       priceMismatchSale,
       baseValid,
@@ -954,20 +1051,21 @@ describe('POS connector and durable recovery engine', () => {
 
     const preview = await engine.previewPending();
     expect(preview.outcome).toBe('COMPLETED');
-    expect(preview.summary.reviewRequired).toBe(5);
+    expect(preview.summary.reviewRequired).toBe(6);
 
     const commit = await engine.commitPending();
     expect(commit.outcome).toBe('COMPLETED');
     expect(commit.summary).toEqual({
       imported: 0,
       alreadyImported: 0,
-      reviewRequired: 5,
+      reviewRequired: 6,
       pendingRetry: 0,
     });
 
     const expectedErrors: Array<[string, string]> = [
       ['sale-unknown-item', 'UNKNOWN_ITEM'],
       ['sale-unsupported-mod', 'UNSUPPORTED_MODIFIER'],
+      ['sale-missing-required', 'MISSING_REQUIRED_OPTION'],
       ['sale-missing-snap', 'SNAPSHOT_MISSING'],
       ['sale-price-mismatch', 'PRICE_MISMATCH'],
       ['sale-total-mismatch', 'TOTAL_MISMATCH'],
@@ -1004,7 +1102,7 @@ describe('POS connector and durable recovery engine', () => {
           aliases: [],
           unitPriceUnits: 2000,
           available: true,
-          modifiers: [],
+          optionGroups: [],
         },
       ],
     });
@@ -1171,17 +1269,17 @@ describe('POS connector and durable recovery engine', () => {
       saleId: 'sale-unpaid-01',
       sourceDeviceId: deviceId,
       snapshot,
-      recordedAt: '2026-11-26T13:00:00Z',
-      draftLines: [{ itemId: 'milk-tea', quantity: 1, modifierIds: [] }],
+      recordedAt: '2026-11-27T13:00:00Z',
+      draftLines: [{ itemId: 'americano', quantity: 1, modifierIds: [] }],
       payment: { status: 'UNPAID', receivedUnits: 0 },
     });
     const externalSale = buildConfirmedSale({
       saleId: 'sale-ext-01',
       sourceDeviceId: deviceId,
       snapshot,
-      recordedAt: '2026-11-26T13:01:00Z',
-      draftLines: [{ itemId: 'mohinga', quantity: 1, modifierIds: [] }],
-      payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'KBZPAY-REF-991' },
+      recordedAt: '2026-11-27T13:01:00Z',
+      draftLines: [{ itemId: 'espresso', quantity: 1, modifierIds: ['option-1:choice-1'] }],
+      payment: { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'PROMPTPAY-REF-991' },
     });
 
     await storage.sales.confirmSale(unpaidSale);
@@ -1206,7 +1304,7 @@ describe('POS connector and durable recovery engine', () => {
     expect(server.capturedCommitPayloads[0][1].payment).toEqual({
       status: 'EXTERNAL_UNVERIFIED',
       receivedUnits: 0,
-      reference: 'KBZPAY-REF-991',
+      reference: 'PROMPTPAY-REF-991',
     });
 
     // Case B: Backend supports importing unresolved orders without settling payment.
@@ -1224,11 +1322,11 @@ describe('POS connector and durable recovery engine', () => {
     expect((await storage.payments.getBySaleId('sale-ext-01'))?.payment).toEqual({
       status: 'EXTERNAL_UNVERIFIED',
       receivedUnits: 0,
-      reference: 'KBZPAY-REF-991',
+      reference: 'PROMPTPAY-REF-991',
     });
     expect(server.recordedOrderPayments.map(entry => entry.payment)).toEqual([
       { status: 'UNPAID', receivedUnits: 0 },
-      { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'KBZPAY-REF-991' },
+      { status: 'EXTERNAL_UNVERIFIED', receivedUnits: 0, reference: 'PROMPTPAY-REF-991' },
     ]);
     expect(server.paymentInitiationCount).toBe(0);
     expect(server.kitchenDispatchCount).toBe(0);

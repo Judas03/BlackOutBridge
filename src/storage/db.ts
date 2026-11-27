@@ -31,8 +31,8 @@ export type StoredPaymentRecord = {
   saleId: string;
   status: PaymentRecord['status'];
   recordedAt: string;
-  currency: 'MMK';
-  scale: 0;
+  currency: 'THB';
+  scale: 2;
   totalUnits: number;
   payment: PaymentRecord;
 };

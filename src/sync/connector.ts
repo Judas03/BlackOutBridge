@@ -56,6 +56,8 @@ const SAFE_CODE_DESCRIPTIONS: Record<SanitizedIssueCode | ConnectorErrorCode, st
   UNKNOWN_ITEM: 'An item in this sale no longer matches the POS catalog. Review and map manually.',
   UNSUPPORTED_MODIFIER:
     'A selected modifier is not supported by the POS backend. Review and resolve manually.',
+  MISSING_REQUIRED_OPTION:
+    'A required option group was not selected for an item in this sale. Review and complete manually.',
   SNAPSHOT_MISSING:
     'The backend no longer recognizes the catalog snapshot used for this sale. Manager review required.',
   PRICE_MISMATCH:
