@@ -19,11 +19,16 @@ export type OfflineCacheDiagnostics = {
   controlledBySw: boolean;
   matchingCacheNames: string[];
   cachedAssetCount: number;
+  hasAppShellHtml: boolean;
+  hasAppShellScript: boolean;
+  hasAppShellStyles: boolean;
+  hasRequiredAppShell: boolean;
   readyForOfflineStart: boolean;
 };
 
 export type ServiceWorkerRegistrationLike = {
   active: unknown;
+  scope?: string;
   update(): Promise<unknown>;
 };
 
@@ -74,8 +79,49 @@ function sanitizeErrorMessage(error: unknown): string {
   return 'Service worker registration failed.';
 }
 
-function matchesAppCache(cacheName: string): boolean {
-  return cacheName.includes(PWA_CACHE_ID) || cacheName.startsWith('workbox-precache');
+function matchesAppCache(cacheName: string, registrationScope?: string): boolean {
+  const isAppPrefixed = cacheName === PWA_CACHE_ID || cacheName.startsWith(`${PWA_CACHE_ID}-`);
+  if (!isAppPrefixed) return false;
+  if (registrationScope && cacheName.includes('-precache-v2-')) {
+    return cacheName === `${PWA_CACHE_ID}-precache-v2-${registrationScope}`;
+  }
+  return true;
+}
+
+function extractEntryPathname(entry: unknown): string | null {
+  let rawUrl: string | undefined;
+  if (typeof entry === 'string') {
+    rawUrl = entry;
+  } else if (entry && typeof entry === 'object' && 'url' in entry) {
+    const candidate = (entry as { url?: unknown }).url;
+    if (typeof candidate === 'string') {
+      rawUrl = candidate;
+    }
+  }
+  if (!rawUrl || !rawUrl.trim()) return null;
+  try {
+    return new URL(rawUrl, 'https://app.local').pathname;
+  } catch {
+    return null;
+  }
+}
+
+function isHtmlShellPath(pathname: string): boolean {
+  return pathname === '/' || pathname === '/index.html' || pathname.endsWith('/index.html');
+}
+
+function isAppScriptPath(pathname: string): boolean {
+  if (!pathname.endsWith('.js')) return false;
+  const basename = pathname.split('/').pop() ?? '';
+  return (
+    basename !== 'sw.js' &&
+    basename !== 'registerSW.js' &&
+    !basename.startsWith('workbox-')
+  );
+}
+
+function isAppStylesPath(pathname: string): boolean {
+  return pathname.endsWith('.css');
 }
 
 /**
@@ -196,8 +242,9 @@ export function createPwaController(options?: PwaControllerOptions) {
 }
 
 /**
- * Inspects actual Service Worker registration and CacheStorage entries rather than relying
- * on navigator.onLine alone.
+ * Inspects actual Service Worker registration and CacheStorage entries for this app's scoped
+ * precache and required app-shell assets (HTML, app JS bundle, CSS) rather than relying on
+ * navigator.onLine alone. This diagnostic does not substitute for a live disconnected restart test.
  */
 export async function inspectOfflineCacheReadiness(deps?: {
   serviceWorkerContainer?: ServiceWorkerContainerLike;
@@ -211,32 +258,52 @@ export async function inspectOfflineCacheReadiness(deps?: {
   const controlledBySw = Boolean(swContainer?.controller);
 
   let hasActiveRegistration = false;
+  let registrationScope: string | undefined;
   if (swContainer) {
     try {
       const reg = await swContainer.getRegistration();
       hasActiveRegistration = Boolean(reg?.active);
+      if (typeof reg?.scope === 'string' && reg.scope.trim().length > 0) {
+        registrationScope = reg.scope;
+      }
     } catch {
       hasActiveRegistration = false;
+      registrationScope = undefined;
     }
   }
 
   let matchingCacheNames: string[] = [];
   let cachedAssetCount = 0;
+  let hasAppShellHtml = false;
+  let hasAppShellScript = false;
+  let hasAppShellStyles = false;
 
   if (cacheStorage) {
     try {
       const names = await cacheStorage.keys();
-      matchingCacheNames = names.filter(matchesAppCache);
+      matchingCacheNames = names.filter(name => matchesAppCache(name, registrationScope));
       for (const name of matchingCacheNames) {
         const cache = await cacheStorage.open(name);
         const entries = await cache.keys();
         cachedAssetCount += entries.length;
+        for (const entry of entries) {
+          const pathname = extractEntryPathname(entry);
+          if (!pathname) continue;
+          if (isHtmlShellPath(pathname)) hasAppShellHtml = true;
+          if (isAppScriptPath(pathname)) hasAppShellScript = true;
+          if (isAppStylesPath(pathname)) hasAppShellStyles = true;
+        }
       }
     } catch {
       matchingCacheNames = [];
       cachedAssetCount = 0;
+      hasAppShellHtml = false;
+      hasAppShellScript = false;
+      hasAppShellStyles = false;
     }
   }
+
+  const hasRequiredAppShell = hasAppShellHtml && hasAppShellScript && hasAppShellStyles;
 
   return {
     serviceWorkerSupported,
@@ -245,6 +312,10 @@ export async function inspectOfflineCacheReadiness(deps?: {
     controlledBySw,
     matchingCacheNames,
     cachedAssetCount,
-    readyForOfflineStart: hasActiveRegistration && cachedAssetCount > 0,
+    hasAppShellHtml,
+    hasAppShellScript,
+    hasAppShellStyles,
+    hasRequiredAppShell,
+    readyForOfflineStart: hasActiveRegistration && hasRequiredAppShell,
   };
 }

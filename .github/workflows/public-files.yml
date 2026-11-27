@@ -30,5 +30,7 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Verify SDK imports
         run: npm run check:sdk
+      - name: Run unit, storage, PWA, and recovery tests
+        run: npm test
       - name: Typecheck and build readiness scaffold
         run: npm run build

@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { Socket } from 'node:net';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -1398,5 +1400,49 @@ describe('POS connector and durable recovery engine', () => {
       destinationReceiptId: 'RCPT-TENANT-A-0001',
       issueCodes: [],
     });
+  });
+
+  it('enforces request timeout across stalled response body on a real loopback HTTP server', async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"saleId":"sale-stalled-body"');
+      // Intentionally never call res.end() to simulate headers-then-stalled-body.
+    });
+    server.on('connection', socket => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+
+    await new Promise<void>(resolve => {
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('Expected loopback TCP server address.');
+      }
+      const connector = createHttpPosConnector({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        timeoutMs: 40,
+      });
+
+      const startedAt = Date.now();
+      await expect(connector.status('sale-stalled-body', 'dev-loopback')).rejects.toMatchObject({
+        name: 'ConnectorError',
+        code: 'TIMEOUT',
+        retriable: true,
+      } satisfies Partial<ConnectorError>);
+      const elapsedMs = Date.now() - startedAt;
+      expect(elapsedMs).toBeLessThan(1000);
+    } finally {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>(resolve => {
+        server.close(() => resolve());
+      });
+    }
   });
 });

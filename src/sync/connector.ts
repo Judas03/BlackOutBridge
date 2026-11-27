@@ -299,47 +299,73 @@ export class HttpPosConnector implements PosConnector {
     const controller = typeof AbortController === 'function' ? new AbortController() : undefined;
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
+    let timeoutPromise: Promise<never> | undefined;
 
-    if (controller && this.timeoutMs > 0) {
-      timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, this.timeoutMs);
+    if (this.timeoutMs > 0) {
+      timeoutPromise = new Promise<never>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          controller?.abort();
+          reject(
+            new ConnectorError('TIMEOUT', SAFE_CODE_DESCRIPTIONS.TIMEOUT, { retriable: true })
+          );
+        }, this.timeoutMs);
+      });
+      // Avoid unhandled rejection if fetch/body settles alongside or right before the deadline.
+      timeoutPromise.catch(() => undefined);
     }
 
-    let response: Response;
+    const raceWithTimeout = <T>(promise: Promise<T>): Promise<T> =>
+      timeoutPromise ? Promise.race([promise, timeoutPromise]) : promise;
+
+    const isTimeoutFailure = (error: unknown): boolean =>
+      timedOut ||
+      Boolean(controller?.signal.aborted) ||
+      isAbortError(error) ||
+      (isConnectorError(error) && error.code === 'TIMEOUT');
+
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: init.method,
-        headers,
-        body: init.body,
-        credentials: this.credentials,
-        ...(controller ? { signal: controller.signal } : {}),
-      });
-    } catch (error) {
-      if (timedOut || isAbortError(error)) {
-        throw new ConnectorError('TIMEOUT', SAFE_CODE_DESCRIPTIONS.TIMEOUT, { retriable: true });
+      let response: Response;
+      try {
+        response = await raceWithTimeout(
+          this.fetchImpl(`${this.baseUrl}${path}`, {
+            method: init.method,
+            headers,
+            body: init.body,
+            credentials: this.credentials,
+            ...(controller ? { signal: controller.signal } : {}),
+          })
+        );
+      } catch (error) {
+        if (isTimeoutFailure(error)) {
+          throw new ConnectorError('TIMEOUT', SAFE_CODE_DESCRIPTIONS.TIMEOUT, { retriable: true });
+        }
+        throw new ConnectorError('NETWORK_ERROR', SAFE_CODE_DESCRIPTIONS.NETWORK_ERROR, {
+          retriable: true,
+        });
       }
-      throw new ConnectorError('NETWORK_ERROR', SAFE_CODE_DESCRIPTIONS.NETWORK_ERROR, {
-        retriable: true,
-      });
+
+      if (!response.ok) {
+        void response.body?.cancel?.().catch(() => undefined);
+        throw mapHttpFailure(response.status);
+      }
+
+      try {
+        return await raceWithTimeout(response.json());
+      } catch (error) {
+        if (isTimeoutFailure(error)) {
+          void response.body?.cancel?.().catch(() => undefined);
+          throw new ConnectorError('TIMEOUT', SAFE_CODE_DESCRIPTIONS.TIMEOUT, { retriable: true });
+        }
+        throw new ConnectorError('INVALID_RESPONSE', SAFE_CODE_DESCRIPTIONS.INVALID_RESPONSE, {
+          httpStatus: response.status,
+          retriable: false,
+        });
+      }
     } finally {
       if (timeoutHandle !== undefined) {
         clearTimeout(timeoutHandle);
       }
-    }
-
-    if (!response.ok) {
-      throw mapHttpFailure(response.status);
-    }
-
-    try {
-      return await response.json();
-    } catch {
-      throw new ConnectorError('INVALID_RESPONSE', SAFE_CODE_DESCRIPTIONS.INVALID_RESPONSE, {
-        httpStatus: response.status,
-        retriable: false,
-      });
     }
   }
 

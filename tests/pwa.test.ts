@@ -122,34 +122,81 @@ describe('createPwaController lifecycle', () => {
 });
 
 describe('inspectOfflineCacheReadiness diagnostics', () => {
-  it('requires both an active SW registration and non-empty precache entries', async () => {
-    const emptyCaches: CacheStorageLike = {
-      keys: async () => ['workbox-precache-v2-https://example.web.app/'],
-      open: async () => ({ keys: async () => [] }),
-    };
+  it('requires active SW registration plus required app-shell HTML, JS, and CSS in app-scoped cache', async () => {
     const activeSw: ServiceWorkerContainerLike = {
       controller: {},
       getRegistration: async () => ({
         active: {},
+        scope: 'https://example.web.app/',
         update: async () => undefined,
       }),
     };
 
-    const notReady = await inspectOfflineCacheReadiness({
+    // Unrelated workbox-precache-* cache must be ignored even if populated with HTML/JS/CSS.
+    const unrelatedCaches: CacheStorageLike = {
+      keys: async () => ['workbox-precache-v2-https://other.example/'],
+      open: async () => ({
+        keys: async () => ['/index.html', '/assets/index.js', '/assets/index.css'],
+      }),
+    };
+    const unrelatedResult = await inspectOfflineCacheReadiness({
       serviceWorkerContainer: activeSw,
-      cacheStorage: emptyCaches,
+      cacheStorage: unrelatedCaches,
     });
-    expect(notReady.hasActiveRegistration).toBe(true);
-    expect(notReady.cachedAssetCount).toBe(0);
-    expect(notReady.readyForOfflineStart).toBe(false);
+    expect(unrelatedResult.hasActiveRegistration).toBe(true);
+    expect(unrelatedResult.matchingCacheNames).toEqual([]);
+    expect(unrelatedResult.cachedAssetCount).toBe(0);
+    expect(unrelatedResult.hasRequiredAppShell).toBe(false);
+    expect(unrelatedResult.readyForOfflineStart).toBe(false);
 
+    // Non-empty app cache containing only /icon.svg is not ready.
+    const iconOnlyCaches: CacheStorageLike = {
+      keys: async () => ['blackoutbridge-v1'],
+      open: async () => ({ keys: async () => ['/icon.svg'] }),
+    };
+    const iconOnlyResult = await inspectOfflineCacheReadiness({
+      serviceWorkerContainer: activeSw,
+      cacheStorage: iconOnlyCaches,
+    });
+    expect(iconOnlyResult.cachedAssetCount).toBe(1);
+    expect(iconOnlyResult.hasRequiredAppShell).toBe(false);
+    expect(iconOnlyResult.readyForOfflineStart).toBe(false);
+
+    // Partial app shell missing app JS bundle and CSS (only index.html + registerSW.js) is not ready.
+    const partialShellCaches: CacheStorageLike = {
+      keys: async () => ['blackoutbridge-v1-precache'],
+      open: async () => ({
+        keys: async () => ['/index.html', '/registerSW.js', '/workbox-abc123.js'],
+      }),
+    };
+    const partialResult = await inspectOfflineCacheReadiness({
+      serviceWorkerContainer: activeSw,
+      cacheStorage: partialShellCaches,
+    });
+    expect(partialResult.hasAppShellHtml).toBe(true);
+    expect(partialResult.hasAppShellScript).toBe(false);
+    expect(partialResult.hasAppShellStyles).toBe(false);
+    expect(partialResult.hasRequiredAppShell).toBe(false);
+    expect(partialResult.readyForOfflineStart).toBe(false);
+
+    // Scoped Workbox precache with Request-like entries and full app shell reports ready;
+    // caches for other registration scopes are excluded.
     const populatedCaches: CacheStorageLike = {
-      keys: async () => ['blackoutbridge-v1-precache', 'unrelated-cache'],
+      keys: async () => [
+        'blackoutbridge-v1-precache-v2-https://example.web.app/',
+        'blackoutbridge-v1-precache-v2-https://other.web.app/',
+        'unrelated-cache',
+      ],
       open: async name => ({
         keys: async () =>
-          name === 'blackoutbridge-v1-precache'
-            ? ['/index.html', '/assets/index.js', '/assets/index.css', '/icon.svg']
-            : ['/ignore-me'],
+          name === 'blackoutbridge-v1-precache-v2-https://example.web.app/'
+            ? [
+                { url: 'https://example.web.app/index.html?__WB_REVISION__=5a9f6f' },
+                { url: 'https://example.web.app/assets/index-DqbFatFZ.js' },
+                { url: 'https://example.web.app/assets/index-CdTRqWY8.css' },
+                { url: 'https://example.web.app/icon.svg?__WB_REVISION__=4ed42e' },
+              ]
+            : ['/ignore-me.html', '/ignore-me.js', '/ignore-me.css'],
       }),
     };
 
@@ -157,8 +204,14 @@ describe('inspectOfflineCacheReadiness diagnostics', () => {
       serviceWorkerContainer: activeSw,
       cacheStorage: populatedCaches,
     });
-    expect(ready.matchingCacheNames).toEqual(['blackoutbridge-v1-precache']);
+    expect(ready.matchingCacheNames).toEqual([
+      'blackoutbridge-v1-precache-v2-https://example.web.app/',
+    ]);
     expect(ready.cachedAssetCount).toBe(4);
+    expect(ready.hasAppShellHtml).toBe(true);
+    expect(ready.hasAppShellScript).toBe(true);
+    expect(ready.hasAppShellStyles).toBe(true);
+    expect(ready.hasRequiredAppShell).toBe(true);
     expect(ready.readyForOfflineStart).toBe(true);
   });
 });
